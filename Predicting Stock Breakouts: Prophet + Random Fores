@@ -1,0 +1,128 @@
+# 📈 3-Layer Ensemble Modeling: Prophet + Random Forest
+**By Amiran Kapanadze** | [Lay4Cast.com](https://lay4cast.com)
+
+As a Global WFM Manager, my day job revolves around forecasting massive datasets. Recently, I decided to apply those exact same forecasting principles to the stock market. 
+
+I was tired of expensive Wall Street screeners hiding their algorithmic logic behind black boxes. So, I built an open-source architecture that combines time-series seasonality with volume-weighted price action. 
+
+This notebook demonstrates the exact Machine Learning "Brain" that powers the automated backend of my free stock prediction dashboard: **[Lay4Cast](https://lay4cast.com)**.
+
+### The Architecture:
+1. **Data Ingestion:** `yfinance` for 3-year historical data.
+2. **Seasonality (The Base Model):** Facebook `Prophet` to extract cyclical yearly patterns.
+3. **The Meta-Learner:** `Scikit-Learn Random Forest` to combine Prophet's trend with live volume data to predict the final price movement.
+
+Let's dive in.
+
+# Install Prophet if missing (Kaggle usually has it, but just in case!)
+!pip install prophet yfinance -q
+
+import yfinance as yf
+import pandas as pd
+import numpy as np
+from prophet import Prophet
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_absolute_error
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Set visual style for charts
+sns.set_style("darkgrid")
+print("✅ Environment Ready!")
+
+### Step 1: Data Ingestion & Feature Engineering
+We will use Apple (AAPL) for this example. We are going to download 3 years of data, and calculate our "Layer 1 & 2" features: Intraday Volume Spread and Weekly Trends.
+
+ticker = "AAPL"
+print(f"Downloading data for {ticker}...")
+
+# Download 3 years of daily data
+df = yf.download(ticker, period="3y", progress=False)
+
+# Flatten columns if multi-index (yfinance quirk)
+if isinstance(df.columns, pd.MultiIndex):
+    df.columns = df.columns.get_level_values(0)
+
+df = df.reset_index()
+
+# Feature Engineering: Adding Weekly Rolling Averages
+df['Vol_5d_Avg'] = df['Volume'].rolling(window=5).mean()
+df['Price_5d_Avg'] = df['Close'].rolling(window=5).mean()
+
+# Drop NaN values from rolling
+df = df.dropna()
+
+plt.figure(figsize=(14, 5))
+plt.plot(df['Date'], df['Close'], label="AAPL Close Price", color="#00E5FF")
+plt.title(f"{ticker} 3-Year Historical Price")
+plt.legend()
+plt.show()
+
+### Step 2: Facebook Prophet (Extracting Seasonality)
+Stock markets are highly seasonal (e.g., the "January Effect", summer lulls). We use Prophet to isolate this cyclical behavior from the raw price.
+
+# Prophet requires columns to be named 'ds' and 'y'
+prophet_df = df[['Date', 'Close']].rename(columns={'Date': 'ds', 'Close': 'y'})
+prophet_df['ds'] = prophet_df['ds'].dt.tz_localize(None)
+
+# Initialize Prophet with US Holidays
+m = Prophet(daily_seasonality=False, yearly_seasonality=True)
+m.add_country_holidays(country_name='US')
+m.fit(prophet_df)
+
+# Predict the next 90 days to visualize the trend
+future = m.make_future_dataframe(periods=90)
+forecast = m.predict(future)
+
+# Plot Prophet's breakdown (Trend vs Yearly Seasonality)
+fig = m.plot_components(forecast)
+plt.show()
+
+*Notice the bottom chart above! It clearly shows AAPL's historical yearly cycle—often dipping in Q1/Q2 and peaking in Q4 around hardware announcements. This is our Layer 3 Seasonal Adjustment.*
+
+### Step 3: The Random Forest Meta-Learner
+Prophet is great at time, but bad at context. If volume suddenly spikes 400% today, Prophet doesn't care. 
+We will train a Random Forest to look at today's Volume, the 5-day averages, AND Prophet's trend to make the final prediction.
+
+# Merge Prophet's 'yhat' (prediction) back into our main dataframe
+forecast_clean = forecast[['ds', 'yhat']].rename(columns={'ds': 'Date'})
+df['Date'] = df['Date'].dt.tz_localize(None)
+merged_df = pd.merge(df, forecast_clean, on='Date', how='inner')
+
+# Create our Target (What is the price going to be TOMORROW?)
+merged_df['Target_Next_Close'] = merged_df['Close'].shift(-1)
+merged_df = merged_df.dropna()
+
+# Select our Features
+features = ['Close', 'Volume', 'Vol_5d_Avg', 'Price_5d_Avg', 'yhat']
+X = merged_df[features]
+y = merged_df['Target_Next_Close']
+
+# Train/Test Split (80% Train, 20% Test)
+split_idx = int(len(X) * 0.8)
+X_train, X_test = X[:split_idx], X[split_idx:]
+y_train, y_test = y[:split_idx], y[split_idx:]
+
+# Train the Random Forest
+rf = RandomForestRegressor(n_estimators=150, max_depth=10, random_state=42)
+rf.fit(X_train, y_train)
+
+# Test the model
+predictions = rf.predict(X_test)
+mae = mean_absolute_error(y_test, predictions)
+print(f"✅ Random Forest Mean Absolute Error: ${mae:.2f} per share")
+
+# Visualize the accuracy
+plt.figure(figsize=(14, 5))
+plt.plot(merged_df['Date'][split_idx:], y_test.values, label="Actual Price", color="white")
+plt.plot(merged_df['Date'][split_idx:], predictions, label="Random Forest Prediction", color="#FFD600", alpha=0.8)
+plt.title(f"{ticker} Model Accuracy on Test Data")
+plt.legend()
+plt.show()
+
+### Conclusion
+By stacking models, we mitigate their individual weaknesses. Prophet handles the macro-seasonality, while Random Forest acts on micro-volatility and volume shifts. 
+
+If you want to see this exact model running live in production, analyzing real-time data across the top US tech stocks, check out my free dashboard at **[Lay4Cast.com](https://lay4cast.com)**.
+
+Feel free to fork this notebook, plug in your own tickers, and tweak the hyperparameters! Let me know in the comments if you find any interesting correlations. 📈
